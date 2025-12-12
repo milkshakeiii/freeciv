@@ -7,13 +7,17 @@
 #include <string.h>
 #include "fcgym.h"
 
-/* For terrain manipulation in tests */
+/* For terrain manipulation and unit creation in tests */
 #include "tile.h"
 #include "terrain.h"
 #include "extras.h"
 #include "map.h"
 #include "game.h"
 #include "unit.h"
+#include "unittype.h"
+#include "player.h"
+#include "unittools.h"
+#include "city.h"
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -847,6 +851,150 @@ int main(int argc, char **argv)
         printf("SKIP: No city available to build units\n");
     }
     fcgym_free_valid_actions(&valid);
+
+    /* ========== Test 15: Attack Enemy Unit ========== */
+    printf("\n=== Test 15: Attack Enemy Unit ===\n");
+    fcgym_get_observation(&obs);
+
+    /* Find one of our military units that can attack */
+    int attacker_id = -1;
+    for (int i = 0; i < obs.num_units; i++) {
+        if (obs.units[i].owner == obs.controlled_player) {
+            struct unit *punit = game_unit_by_number(obs.units[i].id);
+            if (punit != NULL && utype_can_do_action(unit_type_get(punit), ACTION_ATTACK)) {
+                attacker_id = obs.units[i].id;
+                printf("Found attacker: %s (id=%d)\n",
+                       utype_rule_name(unit_type_get(punit)), attacker_id);
+                break;
+            }
+        }
+    }
+    if (attacker_id < 0) {
+        /* No combat unit found - create one */
+        printf("No combat unit found, creating Warriors\n");
+        struct player *our_player = player_by_number(obs.controlled_player);
+        const struct unit_type *warriors_type = unit_type_by_rule_name("Warriors");
+        if (our_player != NULL && warriors_type != NULL) {
+            /* Find our city to get a tile */
+            for (int i = 0; i < obs.num_cities; i++) {
+                if (obs.cities[i].owner == obs.controlled_player) {
+                    struct city *pcity = game_city_by_number(obs.cities[i].id);
+                    if (pcity != NULL) {
+                        struct unit *new_unit = create_unit(our_player, pcity->tile,
+                                                           warriors_type, 0, pcity->id, -1);
+                        if (new_unit != NULL) {
+                            attacker_id = new_unit->id;
+                            printf("Created Warriors (id=%d) for attack test\n", attacker_id);
+                            fcgym_get_observation(&obs);  /* Refresh observation */
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (attacker_id >= 0) {
+        struct unit *attacker = game_unit_by_number(attacker_id);
+        if (attacker != NULL) {
+            struct tile *attacker_tile = attacker->tile;
+
+            /* Find an AI player to own the enemy unit */
+            struct player *enemy_player = NULL;
+            for (int i = 0; i < obs.num_players; i++) {
+                if (obs.players[i].is_ai && obs.players[i].is_alive) {
+                    enemy_player = player_by_number(obs.players[i].index);
+                    break;
+                }
+            }
+
+            if (enemy_player != NULL) {
+                /* Find an adjacent land tile for the enemy unit */
+                struct tile *enemy_tile = NULL;
+                for (int dir = 0; dir < 8; dir++) {
+                    struct tile *adj = mapstep(&(wld.map), attacker_tile, dir);
+                    if (adj != NULL && !is_ocean_tile(adj)) {
+                        enemy_tile = adj;
+                        break;
+                    }
+                }
+
+                if (enemy_tile != NULL) {
+                    /* Create an enemy Warriors unit */
+                    const struct unit_type *warriors_type = unit_type_by_rule_name("Warriors");
+                    if (warriors_type != NULL) {
+                        struct unit *enemy = create_unit(enemy_player, enemy_tile,
+                                                        warriors_type, 0, 0, -1);
+                        if (enemy != NULL) {
+                            printf("Created enemy Warriors at adjacent tile\n");
+
+                            /* Get valid actions - should now have can_attack */
+                            fcgym_get_valid_actions(&valid);
+                            bool can_attack_now = false;
+                            int attack_dir = -1;
+                            for (int i = 0; i < valid.num_unit_actions; i++) {
+                                if (valid.unit_actions[i].unit_id == attacker_id &&
+                                    valid.unit_actions[i].can_attack) {
+                                    can_attack_now = true;
+                                    /* Find the direction to the enemy */
+                                    for (int d = 0; d < 8; d++) {
+                                        struct tile *adj = mapstep(&(wld.map), attacker_tile, d);
+                                        if (adj == enemy_tile) {
+                                            attack_dir = d;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            fcgym_free_valid_actions(&valid);
+
+                            TEST_ASSERT(can_attack_now, "can_attack is true with adjacent enemy");
+
+                            if (can_attack_now && attack_dir >= 0) {
+                                int enemy_id = enemy->id;
+                                int enemy_tile_index = tile_index(enemy_tile);
+
+                                printf("Attacking with unit %d toward tile %d\n", attacker_id, enemy_tile_index);
+
+                                FcAction attack = {
+                                    .type = FCGYM_ACTION_UNIT_ATTACK,
+                                    .actor_id = attacker_id,
+                                    .target_id = enemy_tile_index,
+                                };
+                                fcgym_step(&attack);
+                                fcgym_get_observation(&obs);
+
+                                /* Check that combat happened - one unit should be gone or damaged */
+                                struct unit *attacker_after = game_unit_by_number(attacker_id);
+                                struct unit *enemy_after = game_unit_by_number(enemy_id);
+
+                                bool combat_happened = (attacker_after == NULL || enemy_after == NULL ||
+                                                       (attacker_after != NULL && attacker_after->hp < attacker->hp) ||
+                                                       (enemy_after != NULL && enemy_after->hp < warriors_type->hp));
+
+                                printf("After attack: attacker %s, enemy %s\n",
+                                       attacker_after ? "alive" : "dead",
+                                       enemy_after ? "alive" : "dead");
+
+                                TEST_ASSERT(combat_happened, "Combat occurred (unit killed or damaged)");
+                            }
+                        } else {
+                            printf("SKIP: Failed to create enemy unit\n");
+                        }
+                    } else {
+                        printf("SKIP: Warriors unit type not found\n");
+                    }
+                } else {
+                    printf("SKIP: No adjacent land tile found\n");
+                }
+            } else {
+                printf("SKIP: No AI player found\n");
+            }
+        }
+    } else {
+        printf("SKIP: No unit available to attack with\n");
+    }
 
     /* ========== Summary ========== */
     printf("\n=== Test Summary ===\n");

@@ -910,9 +910,13 @@ FcStepResult fcgym_step(const FcAction *action)
             /* Target is a tile index containing enemy units */
             struct tile *target_tile = index_to_tile(&(wld.map), action->target_id);
             if (target_tile != NULL) {
-                /* Use unit_perform_action with ACTION_ATTACK */
-                unit_perform_action(pplayer, punit->id, tile_index(target_tile),
-                                   0, NULL, ACTION_ATTACK, ACT_REQ_PLAYER);
+                /* Check if attack is possible first */
+                if (is_action_enabled_unit_on_stack(&(wld.map), ACTION_ATTACK,
+                                                    punit, target_tile)) {
+                    /* Use unit_perform_action with ACTION_ATTACK */
+                    unit_perform_action(pplayer, punit->id, tile_index(target_tile),
+                                       NO_TARGET, "", ACTION_ATTACK, ACT_REQ_RULES);
+                }
             }
         }
         break;
