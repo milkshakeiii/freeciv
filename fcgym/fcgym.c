@@ -22,10 +22,12 @@
 #include "support.h"
 
 /* Freeciv common headers */
+#include "actions.h"
 #include "ai.h"
 #include "city.h"
 #include "fc_types.h"
 #include "game.h"
+#include "improvement.h"
 #include "map.h"
 #include "movement.h"
 #include "nation.h"
@@ -43,6 +45,7 @@
 #include "aiiface.h"
 #include "animals.h"
 #include "citytools.h"
+#include "cityhand.h"
 #include "cityturn.h"
 #include "gamehand.h"
 #include "mapgen.h"
@@ -307,6 +310,10 @@ static int fcgym_start_game(void)
     /* Notify AI modules that game has started */
     CALL_FUNC_EACH_AI(game_start);
 
+    /* Start the first turn and phase - matches normal server flow */
+    begin_turn(TRUE);
+    begin_phase(TRUE);
+
     return 0;
 }
 
@@ -347,18 +354,12 @@ static void fcgym_process_end_phase(void)
  */
 static void fcgym_advance_turn(void)
 {
-    /* Simplified turn advancement */
+    /* Advance turn counter */
     game.info.turn++;
 
-    /* Update year/calendar */
-    game.info.year = game.info.turn; /* Simplified */
-
-    /* Run begin_turn logic */
-    players_iterate(pplayer) {
-        if (pplayer->is_alive) {
-            calc_civ_score(pplayer);
-        }
-    } players_iterate_end;
+    /* Use the standard freeciv turn/phase flow */
+    begin_turn(TRUE);
+    begin_phase(TRUE);
 }
 
 /*
@@ -598,10 +599,18 @@ void fcgym_get_observation(FcObservation *obs)
                 cobs->size = city_size_get(pcity);
                 cobs->food_stock = pcity->food_stock;
                 cobs->shield_stock = pcity->shield_stock;
-                /* Production info - simplified */
-                cobs->producing_type = -1;
-                cobs->producing_is_unit = false;
-                cobs->turns_to_complete = -1;
+                /* Production info */
+                if (pcity->production.kind == VUT_UTYPE) {
+                    cobs->producing_is_unit = true;
+                    cobs->producing_type = utype_index(pcity->production.value.utype);
+                } else if (pcity->production.kind == VUT_IMPROVEMENT) {
+                    cobs->producing_is_unit = false;
+                    cobs->producing_type = improvement_index(pcity->production.value.building);
+                } else {
+                    cobs->producing_type = -1;
+                    cobs->producing_is_unit = false;
+                }
+                cobs->turns_to_complete = city_production_turns_to_build(pcity, TRUE);
             }
         } city_list_iterate_end;
     } players_iterate_end;
@@ -654,8 +663,173 @@ void fcgym_free_observation(FcObservation *obs)
 
 void fcgym_get_valid_actions(FcValidActions *actions)
 {
-    /* TODO: Implement action masking */
-    (void)actions;
+    if (actions == NULL || !fcgym_game_running) {
+        return;
+    }
+
+    memset(actions, 0, sizeof(*actions));
+
+    struct player *pplayer = player_by_number(controlled_player_idx);
+    if (pplayer == NULL) {
+        return;
+    }
+
+    /* Can always end turn */
+    actions->can_end_turn = true;
+
+    /* Count units and cities for allocation */
+    int num_units = unit_list_size(pplayer->units);
+    int num_cities = city_list_size(pplayer->cities);
+
+    /* Allocate unit actions array */
+    if (num_units > 0) {
+        actions->unit_actions = fc_calloc(num_units, sizeof(*actions->unit_actions));
+        actions->num_unit_actions = num_units;
+
+        int idx = 0;
+        unit_list_iterate(pplayer->units, punit) {
+            actions->unit_actions[idx].unit_id = punit->id;
+
+            /* Check movement in each valid direction */
+            for (int d = 0; d < wld.map.num_valid_dirs; d++) {
+                enum direction8 dir = wld.map.valid_dirs[d];
+                struct tile *dst_tile = mapstep(&(wld.map), punit->tile, dir);
+
+                if (dst_tile != NULL && punit->moves_left > 0) {
+                    /* Check if can move to tile (simplified - just check basic movement) */
+                    if (unit_can_move_to_tile(&(wld.map), punit, dst_tile, FALSE, FALSE, FALSE)) {
+                        actions->unit_actions[idx].can_move[dir] = true;
+                    }
+                    /* Also allow if there's an enemy to attack */
+                    if (is_enemy_unit_tile(dst_tile, pplayer) ||
+                        is_enemy_city_tile(dst_tile, pplayer)) {
+                        actions->unit_actions[idx].can_attack = true;
+                        actions->unit_actions[idx].can_move[dir] = true;
+                    }
+                }
+            }
+
+            /* Check fortify capability */
+            if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_FORTIFYING,
+                                     activity_default_action(ACTIVITY_FORTIFYING))) {
+                actions->unit_actions[idx].can_fortify = true;
+            }
+
+            /* Check can build city */
+            if (is_action_enabled_unit_on_tile(
+                    &(wld.map), ACTION_FOUND_CITY, punit, punit->tile, NULL)) {
+                actions->unit_actions[idx].can_build_city = true;
+            }
+
+            /* Check can build road/irrigation/mine */
+            if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_GEN_ROAD,
+                                     activity_default_action(ACTIVITY_GEN_ROAD))) {
+                actions->unit_actions[idx].can_build_road = true;
+            }
+            if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_IRRIGATE,
+                                     activity_default_action(ACTIVITY_IRRIGATE))) {
+                actions->unit_actions[idx].can_build_irrigation = true;
+            }
+            if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_MINE,
+                                     activity_default_action(ACTIVITY_MINE))) {
+                actions->unit_actions[idx].can_build_mine = true;
+            }
+
+            /* Can always disband own units */
+            actions->unit_actions[idx].can_disband = true;
+
+            idx++;
+        } unit_list_iterate_end;
+    }
+
+    /* Allocate city actions array */
+    if (num_cities > 0) {
+        actions->city_actions = fc_calloc(num_cities, sizeof(*actions->city_actions));
+        actions->num_city_actions = num_cities;
+
+        int cidx = 0;
+        city_list_iterate(pplayer->cities, pcity) {
+            actions->city_actions[cidx].city_id = pcity->id;
+
+            /* Count buildable units */
+            int num_buildable_units = 0;
+            unit_type_iterate(ptype) {
+                if (can_city_build_unit_now(&(wld.map), pcity, ptype)) {
+                    num_buildable_units++;
+                }
+            } unit_type_iterate_end;
+
+            /* Allocate and fill buildable units */
+            if (num_buildable_units > 0) {
+                actions->city_actions[cidx].buildable_units =
+                    fc_malloc(num_buildable_units * sizeof(int));
+                actions->city_actions[cidx].num_buildable_units = num_buildable_units;
+
+                int uidx = 0;
+                unit_type_iterate(ptype) {
+                    if (can_city_build_unit_now(&(wld.map), pcity, ptype)) {
+                        actions->city_actions[cidx].buildable_units[uidx++] =
+                            utype_index(ptype);
+                    }
+                } unit_type_iterate_end;
+            }
+
+            /* Count buildable buildings */
+            int num_buildable_buildings = 0;
+            improvement_iterate(pimprove) {
+                if (can_city_build_improvement_now(pcity, pimprove)) {
+                    num_buildable_buildings++;
+                }
+            } improvement_iterate_end;
+
+            /* Allocate and fill buildable buildings */
+            if (num_buildable_buildings > 0) {
+                actions->city_actions[cidx].buildable_buildings =
+                    fc_malloc(num_buildable_buildings * sizeof(int));
+                actions->city_actions[cidx].num_buildable_buildings = num_buildable_buildings;
+
+                int bidx = 0;
+                improvement_iterate(pimprove) {
+                    if (can_city_build_improvement_now(pcity, pimprove)) {
+                        actions->city_actions[cidx].buildable_buildings[bidx++] =
+                            improvement_index(pimprove);
+                    }
+                } improvement_iterate_end;
+            }
+
+            /* Check if can buy current production */
+            actions->city_actions[cidx].can_buy =
+                (pcity->shield_stock < city_production_build_shield_cost(pcity) &&
+                 pplayer->economic.gold >= city_production_buy_gold_cost(pcity));
+
+            cidx++;
+        } city_list_iterate_end;
+    }
+
+    /* Get researchable techs - only those with prerequisites known */
+    struct research *presearch = research_get(pplayer);
+    if (presearch != NULL) {
+        /* Count researchable techs (prereqs known, not already known) */
+        int num_techs = 0;
+        advance_iterate(adv) {
+            if (research_invention_state(presearch, advance_index(adv)) == TECH_PREREQS_KNOWN) {
+                num_techs++;
+            }
+        } advance_iterate_end;
+
+        /* Allocate and fill researchable techs */
+        if (num_techs > 0) {
+            actions->researchable_techs = fc_malloc(num_techs * sizeof(int));
+            actions->num_researchable_techs = num_techs;
+
+            int tidx = 0;
+            advance_iterate(adv) {
+                if (research_invention_state(presearch, advance_index(adv)) == TECH_PREREQS_KNOWN) {
+                    actions->researchable_techs[tidx++] = advance_index(adv);
+                }
+            } advance_iterate_end;
+        }
+    }
 }
 
 void fcgym_free_valid_actions(FcValidActions *actions)
@@ -663,7 +837,24 @@ void fcgym_free_valid_actions(FcValidActions *actions)
     if (actions == NULL) {
         return;
     }
-    /* TODO: Free allocated arrays */
+
+    /* Free unit actions arrays */
+    if (actions->unit_actions != NULL) {
+        free(actions->unit_actions);
+    }
+
+    /* Free city actions arrays */
+    if (actions->city_actions != NULL) {
+        for (int i = 0; i < actions->num_city_actions; i++) {
+            free(actions->city_actions[i].buildable_units);
+            free(actions->city_actions[i].buildable_buildings);
+        }
+        free(actions->city_actions);
+    }
+
+    /* Free research array */
+    free(actions->researchable_techs);
+
     memset(actions, 0, sizeof(*actions));
 }
 
@@ -690,7 +881,24 @@ FcStepResult fcgym_step(const FcAction *action)
             enum direction8 dir = action->sub_target;
             struct tile *dst_tile = mapstep(&(wld.map), punit->tile, dir);
             if (dst_tile != NULL) {
-                unit_move_handling(punit, dst_tile, FALSE);
+                /* Use unit_move_handling - it calls unit_perform_action internally
+                 * and handles edge cases like transport embark.
+                 * TRUE skips action decision dialogs (like AI/goto does). */
+                unit_move_handling(punit, dst_tile, TRUE);
+            }
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_UNIT_ATTACK: {
+        struct unit *punit = game_unit_by_number(action->actor_id);
+        if (punit != NULL && unit_owner(punit) == pplayer) {
+            /* Target is a tile index containing enemy units */
+            struct tile *target_tile = index_to_tile(&(wld.map), action->target_id);
+            if (target_tile != NULL) {
+                /* Use unit_perform_action with ACTION_ATTACK */
+                unit_perform_action(pplayer, punit->id, tile_index(target_tile),
+                                   0, NULL, ACTION_ATTACK, ACT_REQ_PLAYER);
             }
         }
         break;
@@ -699,7 +907,9 @@ FcStepResult fcgym_step(const FcAction *action)
     case FCGYM_ACTION_UNIT_FORTIFY: {
         struct unit *punit = game_unit_by_number(action->actor_id);
         if (punit != NULL && unit_owner(punit) == pplayer) {
-            unit_activity_handling(punit, ACTIVITY_FORTIFYING, ACTION_NONE);
+            /* Use unit_activity_handling - the proper high-level handler */
+            unit_activity_handling(punit, ACTIVITY_FORTIFYING,
+                                   activity_default_action(ACTIVITY_FORTIFYING));
         }
         break;
     }
@@ -707,10 +917,75 @@ FcStepResult fcgym_step(const FcAction *action)
     case FCGYM_ACTION_UNIT_BUILD_CITY: {
         struct unit *punit = game_unit_by_number(action->actor_id);
         if (punit != NULL && unit_owner(punit) == pplayer) {
+            /* Get a suggested city name */
+            const char *name = city_name_suggestion(pplayer, punit->tile);
             /* Use action system to build city */
             unit_perform_action(pplayer, punit->id, tile_index(punit->tile),
-                               0, NULL, ACTION_FOUND_CITY, ACT_REQ_PLAYER);
+                               0, name, ACTION_FOUND_CITY, ACT_REQ_PLAYER);
         }
+        break;
+    }
+
+    case FCGYM_ACTION_UNIT_BUILD_ROAD: {
+        struct unit *punit = game_unit_by_number(action->actor_id);
+        if (punit != NULL && unit_owner(punit) == pplayer) {
+            handle_unit_change_activity(pplayer, punit->id,
+                                        ACTIVITY_GEN_ROAD, action->sub_target);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_UNIT_BUILD_IRRIGATION: {
+        struct unit *punit = game_unit_by_number(action->actor_id);
+        if (punit != NULL && unit_owner(punit) == pplayer) {
+            handle_unit_change_activity(pplayer, punit->id,
+                                        ACTIVITY_IRRIGATE, action->sub_target);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_UNIT_BUILD_MINE: {
+        struct unit *punit = game_unit_by_number(action->actor_id);
+        if (punit != NULL && unit_owner(punit) == pplayer) {
+            handle_unit_change_activity(pplayer, punit->id,
+                                        ACTIVITY_MINE, action->sub_target);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_UNIT_DISBAND: {
+        struct unit *punit = game_unit_by_number(action->actor_id);
+        if (punit != NULL && unit_owner(punit) == pplayer) {
+            unit_perform_action(pplayer, punit->id, IDENTITY_NUMBER_ZERO,
+                               0, NULL, ACTION_DISBAND_UNIT, ACT_REQ_PLAYER);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_CITY_BUILD: {
+        struct city *pcity = game_city_by_number(action->actor_id);
+        if (pcity != NULL && city_owner(pcity) == pplayer) {
+            /* Use handle_city_change - the proper high-level handler
+             * sub_target: 0 = unit, 1 = building
+             * target_id: unit type index or improvement index */
+            int production_kind = action->sub_target ? VUT_IMPROVEMENT : VUT_UTYPE;
+            handle_city_change(pplayer, pcity->id, production_kind, action->target_id);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_CITY_BUY: {
+        struct city *pcity = game_city_by_number(action->actor_id);
+        if (pcity != NULL && city_owner(pcity) == pplayer) {
+            /* Try to buy current production */
+            really_handle_city_buy(pplayer, pcity);
+        }
+        break;
+    }
+
+    case FCGYM_ACTION_RESEARCH_SET: {
+        /* target_id is the tech index to research */
+        handle_player_research(pplayer, action->target_id);
         break;
     }
 

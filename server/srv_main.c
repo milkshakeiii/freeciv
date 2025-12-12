@@ -1152,7 +1152,7 @@ static void ai_start_phase(void)
   Note: This does not give "time" to any player;
         it is solely for updating turn-dependent data.
 **************************************************************************/
-static void begin_turn(bool is_new_turn)
+void begin_turn(bool is_new_turn)
 {
   log_debug("Begin turn");
 
@@ -1259,7 +1259,7 @@ static void begin_turn(bool is_new_turn)
   Begin a phase of movement. This handles all beginning-of-phase actions
   for one or more players.
 **************************************************************************/
-static void begin_phase(bool is_new_phase)
+void begin_phase(bool is_new_phase)
 {
   log_debug("Begin phase");
 
