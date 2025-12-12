@@ -401,6 +401,164 @@ int main(int argc, char **argv)
     printf("After: turn %d\n", obs.turn);
     TEST_ASSERT(obs.turn == old_turn + 1, "Turn number increased by 1");
 
+    /* ========== Test 9: AI Turn Cycle ========== */
+    printf("\n=== Test 9: AI Turn Cycle ===\n");
+    fcgym_get_observation(&obs);
+
+    /* Record state before turn */
+    int turn_before = obs.turn;
+    int controlled = obs.controlled_player;
+
+    /* Record our units' movement points */
+    int our_unit_id = -1;
+    int our_unit_moves_before = -1;
+    for (int i = 0; i < obs.num_units; i++) {
+        if (obs.units[i].owner == controlled) {
+            our_unit_id = obs.units[i].id;
+            our_unit_moves_before = obs.units[i].moves_left;
+            break;
+        }
+    }
+
+    /* Record AI player states */
+    printf("Before end turn (turn %d):\n", turn_before);
+    printf("  Controlled player: %d\n", controlled);
+    for (int i = 0; i < obs.num_players; i++) {
+        if (obs.players[i].is_ai && obs.players[i].is_alive) {
+            printf("  AI player %d: gold=%d, units=%d, cities=%d\n",
+                   obs.players[i].index,
+                   obs.players[i].gold,
+                   obs.players[i].num_units,
+                   obs.players[i].num_cities);
+        }
+    }
+
+    /* Find a unit that can actually move and use up some movement points */
+    bool found_movable = false;
+    fcgym_get_valid_actions(&valid);
+    for (int i = 0; i < valid.num_unit_actions && !found_movable; i++) {
+        for (int d = 0; d < 8; d++) {
+            if (valid.unit_actions[i].can_move[d]) {
+                our_unit_id = valid.unit_actions[i].unit_id;
+                FcUnitObs *unit = get_unit_by_id(&obs, our_unit_id);
+                if (unit) {
+                    our_unit_moves_before = unit->moves_left;
+                    printf("  Moving unit %d (moves=%d)\n", our_unit_id, our_unit_moves_before);
+
+                    FcAction move = {
+                        .type = FCGYM_ACTION_UNIT_MOVE,
+                        .actor_id = our_unit_id,
+                        .sub_target = d,
+                    };
+                    fcgym_step(&move);
+
+                    fcgym_get_observation(&obs);
+                    unit = get_unit_by_id(&obs, our_unit_id);
+                    if (unit && unit->moves_left < our_unit_moves_before) {
+                        printf("  Unit %d moves after action: %d (was %d)\n",
+                               our_unit_id, unit->moves_left, our_unit_moves_before);
+                        our_unit_moves_before = unit->moves_left;
+                        found_movable = true;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    fcgym_free_valid_actions(&valid);
+
+    if (!found_movable) {
+        printf("  No movable unit found, skipping movement restoration test\n");
+        our_unit_id = -1;
+    }
+
+    /* End turn - AI should take their turns */
+    printf("\nEnding turn...\n");
+    FcAction end = { .type = FCGYM_ACTION_END_TURN };
+    result = fcgym_step(&end);
+
+    fcgym_get_observation(&obs);
+    printf("\nAfter end turn (turn %d):\n", obs.turn);
+    TEST_ASSERT(obs.turn == turn_before + 1, "Turn advanced after AI turns");
+
+    /* Check our unit got movement points back */
+    if (our_unit_id >= 0) {
+        FcUnitObs *unit = get_unit_by_id(&obs, our_unit_id);
+        if (unit) {
+            printf("  Our unit %d moves restored: %d\n", our_unit_id, unit->moves_left);
+            TEST_ASSERT(unit->moves_left > our_unit_moves_before,
+                       "Unit movement points restored after turn");
+        }
+    }
+
+    /* Check AI states changed (they should have done something) */
+    printf("  AI player states after their turns:\n");
+    for (int i = 0; i < obs.num_players; i++) {
+        if (obs.players[i].is_ai && obs.players[i].is_alive) {
+            printf("    AI player %d: gold=%d, units=%d, cities=%d\n",
+                   obs.players[i].index,
+                   obs.players[i].gold,
+                   obs.players[i].num_units,
+                   obs.players[i].num_cities);
+        }
+    }
+
+    /* Verify we can still take actions (it's our turn again) */
+    fcgym_get_valid_actions(&valid);
+    TEST_ASSERT(valid.can_end_turn, "Can end turn (it's our turn)");
+    TEST_ASSERT(valid.num_unit_actions > 0 || count_player_units(&obs, controlled) == 0,
+               "Have unit actions available (or no units)");
+    printf("  We have %d units with actions available\n", valid.num_unit_actions);
+    fcgym_free_valid_actions(&valid);
+
+    /* ========== Test 10: Multiple Turn Cycle ========== */
+    printf("\n=== Test 10: Multiple Turn Cycle ===\n");
+    printf("Running 5 turns to verify stability...\n");
+
+    int start_turn = obs.turn;
+    for (int t = 0; t < 5; t++) {
+        fcgym_get_observation(&obs);
+        int current_turn = obs.turn;
+
+        /* Do a simple action each turn if possible */
+        fcgym_get_valid_actions(&valid);
+        if (valid.num_unit_actions > 0) {
+            /* Try to move first available unit */
+            for (int i = 0; i < valid.num_unit_actions; i++) {
+                for (int d = 0; d < 8; d++) {
+                    if (valid.unit_actions[i].can_move[d]) {
+                        FcAction move = {
+                            .type = FCGYM_ACTION_UNIT_MOVE,
+                            .actor_id = valid.unit_actions[i].unit_id,
+                            .sub_target = d,
+                        };
+                        fcgym_step(&move);
+                        goto done_action;
+                    }
+                }
+            }
+        }
+        done_action:
+        fcgym_free_valid_actions(&valid);
+
+        /* End turn */
+        FcAction et = { .type = FCGYM_ACTION_END_TURN };
+        result = fcgym_step(&et);
+
+        fcgym_get_observation(&obs);
+        printf("  Turn %d -> %d (game_over=%d)\n", current_turn, obs.turn, obs.game_over);
+
+        if (obs.game_over) {
+            printf("  Game ended early!\n");
+            break;
+        }
+    }
+
+    fcgym_get_observation(&obs);
+    TEST_ASSERT(obs.turn >= start_turn + 5 || obs.game_over,
+               "Completed 5 turns or game ended");
+    printf("Final turn: %d, game_over: %d\n", obs.turn, obs.game_over);
+
     /* ========== Summary ========== */
     printf("\n=== Test Summary ===\n");
     printf("Passed: %d\n", tests_passed);
