@@ -146,8 +146,101 @@ int main(int argc, char **argv)
         printf("SKIP: No settler found\n");
     }
 
-    /* ========== Test 2: Unit Movement ========== */
-    printf("\n=== Test 2: Unit Movement ===\n");
+    /* ========== Test 2: Buy (Rush) Production ========== */
+    printf("\n=== Test 2: Buy (Rush) Production ===\n");
+
+    /* End turn first - can't buy in city the turn it was founded */
+    FcAction end_first = { .type = FCGYM_ACTION_END_TURN };
+    fcgym_step(&end_first);
+
+    fcgym_get_observation(&obs);
+    fcgym_get_valid_actions(&valid);
+
+    /* After ending turn, we can buy in the city */
+    if (valid.num_city_actions > 0) {
+        int city_id = valid.city_actions[0].city_id;
+        FcCityObs *city = get_city_by_id(&obs, city_id);
+
+        /* Find Warriors (cheap unit, costs 10 shields) */
+        int warriors_type = -1;
+        for (int u = 0; u < valid.city_actions[0].num_buildable_units; u++) {
+            int unit_type = valid.city_actions[0].buildable_units[u];
+            const char *name = fcgym_unit_type_name(unit_type);
+            if (name && strcmp(name, "Warriors") == 0) {
+                warriors_type = unit_type;
+                break;
+            }
+        }
+
+        if (warriors_type >= 0) {
+            /* Set production to Warriors */
+            FcAction set_prod = {
+                .type = FCGYM_ACTION_CITY_BUILD,
+                .actor_id = city_id,
+                .target_id = warriors_type,
+                .sub_target = 0,
+            };
+            fcgym_step(&set_prod);
+
+            /* Check if we can buy */
+            fcgym_get_observation(&obs);
+            fcgym_get_valid_actions(&valid);
+
+            bool can_buy_now = false;
+            for (int i = 0; i < valid.num_city_actions; i++) {
+                if (valid.city_actions[i].city_id == city_id && valid.city_actions[i].can_buy) {
+                    can_buy_now = true;
+                    break;
+                }
+            }
+
+            city = get_city_by_id(&obs, city_id);
+            int gold_before = obs.players[obs.controlled_player].gold;
+            int shields_before = city ? city->shield_stock : 0;
+            int units_before = count_player_units(&obs, obs.controlled_player);
+
+            printf("City %d building Warriors, gold=%d, shields=%d, can_buy=%d\n",
+                   city_id, gold_before, shields_before, can_buy_now);
+
+            if (can_buy_now) {
+                FcAction buy = {
+                    .type = FCGYM_ACTION_CITY_BUY,
+                    .actor_id = city_id,
+                };
+                fcgym_step(&buy);
+                fcgym_get_observation(&obs);
+
+                int gold_after = obs.players[obs.controlled_player].gold;
+                city = get_city_by_id(&obs, city_id);
+                int shields_after = city ? city->shield_stock : 0;
+
+                printf("After buy: gold=%d (was %d), shields=%d (was %d)\n",
+                       gold_after, gold_before, shields_after, shields_before);
+
+                TEST_ASSERT(gold_after < gold_before, "Gold decreased after buying");
+                TEST_ASSERT(shields_after > shields_before, "Shield stock filled after buying");
+
+                /* End turn to see the unit actually created */
+                FcAction end = { .type = FCGYM_ACTION_END_TURN };
+                fcgym_step(&end);
+                fcgym_get_observation(&obs);
+
+                int units_after = count_player_units(&obs, obs.controlled_player);
+                printf("After turn end: units=%d (was %d)\n", units_after, units_before);
+                TEST_ASSERT(units_after > units_before, "Unit was built after turn ended");
+            } else {
+                printf("SKIP: Cannot afford to buy Warriors (gold=%d)\n", gold_before);
+            }
+        } else {
+            printf("SKIP: Warriors not available\n");
+        }
+    } else {
+        printf("SKIP: No city available\n");
+    }
+    fcgym_free_valid_actions(&valid);
+
+    /* ========== Test 3: Unit Movement ========== */
+    printf("\n=== Test 3: Unit Movement ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -354,14 +447,19 @@ int main(int argc, char **argv)
     /* ========== Test 7: Disband Unit ========== */
     printf("\n=== Test 7: Disband Unit ===\n");
     fcgym_get_observation(&obs);
+    fcgym_get_valid_actions(&valid);
 
     int units_before = count_player_units(&obs, obs.controlled_player);
 
-    /* Find any unit to disband (prefer explorer or diplomat) */
-    int disband_id = find_unit_by_type_name(&obs, "Explorer", obs.controlled_player);
-    if (disband_id < 0) {
-        disband_id = find_unit_by_type_name(&obs, "Diplomat", obs.controlled_player);
+    /* Find a unit that can actually be disbanded from valid actions */
+    int disband_id = -1;
+    for (int i = 0; i < valid.num_unit_actions; i++) {
+        if (valid.unit_actions[i].can_disband) {
+            disband_id = valid.unit_actions[i].unit_id;
+            break;
+        }
     }
+    fcgym_free_valid_actions(&valid);
 
     if (disband_id >= 0) {
         FcUnitObs *unit = get_unit_by_id(&obs, disband_id);

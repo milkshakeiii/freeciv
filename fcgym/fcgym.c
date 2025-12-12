@@ -735,8 +735,10 @@ void fcgym_get_valid_actions(FcValidActions *actions)
                 actions->unit_actions[idx].can_build_mine = true;
             }
 
-            /* Can always disband own units */
-            actions->unit_actions[idx].can_disband = true;
+            /* Check if unit can be disbanded */
+            actions->unit_actions[idx].can_disband =
+                unit_can_do_action(punit, ACTION_DISBAND_UNIT) &&
+                is_action_enabled_unit_on_self(&(wld.map), ACTION_DISBAND_UNIT, punit);
 
             idx++;
         } unit_list_iterate_end;
@@ -798,9 +800,14 @@ void fcgym_get_valid_actions(FcValidActions *actions)
             }
 
             /* Check if can buy current production */
+            /* Must match conditions in really_handle_city_buy() */
             actions->city_actions[cidx].can_buy =
-                (pcity->shield_stock < city_production_build_shield_cost(pcity) &&
-                 pplayer->economic.gold >= city_production_buy_gold_cost(pcity));
+                (pcity->turn_founded != game.info.turn &&  /* Not founded this turn */
+                 !pcity->did_buy &&                        /* Haven't bought this turn */
+                 pcity->shield_stock < city_production_build_shield_cost(pcity) &&
+                 pplayer->economic.gold >= city_production_buy_gold_cost(pcity) &&
+                 /* Can't buy units when in anarchy */
+                 (pcity->production.kind != VUT_UTYPE || pcity->anarchy == 0));
 
             cidx++;
         } city_list_iterate_end;
@@ -956,7 +963,8 @@ FcStepResult fcgym_step(const FcAction *action)
     case FCGYM_ACTION_UNIT_DISBAND: {
         struct unit *punit = game_unit_by_number(action->actor_id);
         if (punit != NULL && unit_owner(punit) == pplayer) {
-            unit_perform_action(pplayer, punit->id, IDENTITY_NUMBER_ZERO,
+            /* Target is the unit itself for disband actions */
+            unit_perform_action(pplayer, punit->id, punit->id,
                                0, NULL, ACTION_DISBAND_UNIT, ACT_REQ_PLAYER);
         }
         break;
