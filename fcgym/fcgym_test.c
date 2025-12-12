@@ -7,6 +7,14 @@
 #include <string.h>
 #include "fcgym.h"
 
+/* For terrain manipulation in tests */
+#include "tile.h"
+#include "terrain.h"
+#include "extras.h"
+#include "map.h"
+#include "game.h"
+#include "unit.h"
+
 static int tests_passed = 0;
 static int tests_failed = 0;
 
@@ -288,8 +296,8 @@ int main(int argc, char **argv)
     }
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 3: Fortify Unit ========== */
-    printf("\n=== Test 3: Fortify Unit ===\n");
+    /* ========== Test 4: Fortify Unit ========== */
+    printf("\n=== Test 4: Fortify Unit ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -326,8 +334,8 @@ int main(int argc, char **argv)
     }
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 4: Set Research ========== */
-    printf("\n=== Test 4: Set Research ===\n");
+    /* ========== Test 5: Set Research ========== */
+    printf("\n=== Test 5: Set Research ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -363,8 +371,8 @@ int main(int argc, char **argv)
     }
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 5: City Production Change ========== */
-    printf("\n=== Test 5: City Production Change ===\n");
+    /* ========== Test 6: City Production Change ========== */
+    printf("\n=== Test 6: City Production Change ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -408,8 +416,67 @@ int main(int argc, char **argv)
     }
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 6: Workers Build Irrigation ========== */
-    printf("\n=== Test 6: Workers Build Irrigation ===\n");
+    /* ========== Test 7: Workers Build Road ========== */
+    printf("\n=== Test 7: Workers Build Road ===\n");
+    fcgym_get_observation(&obs);
+
+    /* Find Workers unit and prepare terrain for road building */
+    int road_unit_id = find_unit_by_type_name(&obs, "Workers", obs.controlled_player);
+    if (road_unit_id >= 0) {
+        struct unit *punit = game_unit_by_number(road_unit_id);
+        if (punit != NULL) {
+            struct tile *ptile = punit->tile;
+
+            /* Remove any existing road from the tile */
+            struct extra_type *proad = extra_type_by_rule_name("Road");
+            if (proad != NULL && tile_has_extra(ptile, proad)) {
+                tile_remove_extra(ptile, proad);
+                printf("Removed existing road from tile\n");
+            }
+
+            /* Make sure it's grassland (good for roads) */
+            struct terrain *grassland = terrain_by_rule_name("Grassland");
+            if (grassland != NULL && tile_terrain(ptile) != grassland) {
+                tile_set_terrain(ptile, grassland);
+                printf("Set terrain to Grassland\n");
+            }
+        }
+    }
+
+    /* Now check valid actions */
+    fcgym_get_valid_actions(&valid);
+    int found_road_unit = -1;
+    for (int i = 0; i < valid.num_unit_actions; i++) {
+        if (valid.unit_actions[i].can_build_road) {
+            found_road_unit = valid.unit_actions[i].unit_id;
+            break;
+        }
+    }
+
+    if (found_road_unit >= 0) {
+        FcUnitObs *unit = get_unit_by_id(&obs, found_road_unit);
+        const char *type_name = fcgym_unit_type_name(unit->type);
+        printf("Unit %d (%s) will build road\n", found_road_unit, type_name ? type_name : "?");
+
+        FcAction build_road = {
+            .type = FCGYM_ACTION_UNIT_BUILD_ROAD,
+            .actor_id = found_road_unit,
+            .sub_target = -1,  /* auto-select road type */
+        };
+        result = fcgym_step(&build_road);
+
+        /* Activity starts - unit should still exist */
+        fcgym_get_observation(&obs);
+        unit = get_unit_by_id(&obs, found_road_unit);
+        TEST_ASSERT(unit != NULL, "Unit still exists after starting road");
+        printf("Road building activity started\n");
+    } else {
+        printf("SKIP: No unit can build road (even after terrain prep)\n");
+    }
+    fcgym_free_valid_actions(&valid);
+
+    /* ========== Test 8: Workers Build Irrigation ========== */
+    printf("\n=== Test 8: Workers Build Irrigation ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -444,8 +511,68 @@ int main(int argc, char **argv)
     }
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 7: Disband Unit ========== */
-    printf("\n=== Test 7: Disband Unit ===\n");
+    /* ========== Test 9: Workers Build Mine ========== */
+    printf("\n=== Test 9: Workers Build Mine ===\n");
+    fcgym_get_observation(&obs);
+
+    /* Find Workers unit and prepare terrain for mine building */
+    int mine_unit_id = find_unit_by_type_name(&obs, "Workers", obs.controlled_player);
+    if (mine_unit_id >= 0) {
+        struct unit *punit = game_unit_by_number(mine_unit_id);
+        if (punit != NULL) {
+            struct tile *ptile = punit->tile;
+
+            /* Remove any existing mine from the tile */
+            struct extra_type *pmine = extra_type_by_rule_name("Mine");
+            if (pmine != NULL && tile_has_extra(ptile, pmine)) {
+                tile_remove_extra(ptile, pmine);
+                printf("Removed existing mine from tile\n");
+            }
+
+            /* Make sure it's Hills (required for mines) */
+            struct terrain *hills = terrain_by_rule_name("Hills");
+            if (hills != NULL && tile_terrain(ptile) != hills) {
+                tile_set_terrain(ptile, hills);
+                printf("Set terrain to Hills\n");
+            }
+        }
+    }
+
+    /* Now check valid actions */
+    fcgym_get_valid_actions(&valid);
+    int found_mine_unit = -1;
+    for (int i = 0; i < valid.num_unit_actions; i++) {
+        if (valid.unit_actions[i].can_build_mine) {
+            found_mine_unit = valid.unit_actions[i].unit_id;
+            break;
+        }
+    }
+
+    if (found_mine_unit >= 0) {
+        mine_unit_id = found_mine_unit;
+        FcUnitObs *unit = get_unit_by_id(&obs, mine_unit_id);
+        const char *type_name = fcgym_unit_type_name(unit->type);
+        printf("Unit %d (%s) will build mine\n", mine_unit_id, type_name ? type_name : "?");
+
+        FcAction build_mine = {
+            .type = FCGYM_ACTION_UNIT_BUILD_MINE,
+            .actor_id = mine_unit_id,
+            .sub_target = -1,  /* auto-select */
+        };
+        result = fcgym_step(&build_mine);
+
+        /* Activity starts - unit should still exist */
+        fcgym_get_observation(&obs);
+        unit = get_unit_by_id(&obs, mine_unit_id);
+        TEST_ASSERT(unit != NULL, "Unit still exists after starting mine");
+        printf("Mine building activity started\n");
+    } else {
+        printf("SKIP: No unit can build mine (even after terrain prep)\n");
+    }
+    fcgym_free_valid_actions(&valid);
+
+    /* ========== Test 10: Disband Unit ========== */
+    printf("\n=== Test 10: Disband Unit ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 
@@ -483,8 +610,8 @@ int main(int argc, char **argv)
         printf("SKIP: No suitable unit to disband\n");
     }
 
-    /* ========== Test 8: End Turn ========== */
-    printf("\n=== Test 8: End Turn ===\n");
+    /* ========== Test 11: End Turn ========== */
+    printf("\n=== Test 11: End Turn ===\n");
     fcgym_get_observation(&obs);
 
     int old_turn = obs.turn;
@@ -499,8 +626,8 @@ int main(int argc, char **argv)
     printf("After: turn %d\n", obs.turn);
     TEST_ASSERT(obs.turn == old_turn + 1, "Turn number increased by 1");
 
-    /* ========== Test 9: AI Turn Cycle ========== */
-    printf("\n=== Test 9: AI Turn Cycle ===\n");
+    /* ========== Test 12: AI Turn Cycle ========== */
+    printf("\n=== Test 12: AI Turn Cycle ===\n");
     fcgym_get_observation(&obs);
 
     /* Record state before turn */
@@ -609,8 +736,8 @@ int main(int argc, char **argv)
     printf("  We have %d units with actions available\n", valid.num_unit_actions);
     fcgym_free_valid_actions(&valid);
 
-    /* ========== Test 10: Multiple Turn Cycle ========== */
-    printf("\n=== Test 10: Multiple Turn Cycle ===\n");
+    /* ========== Test 13: Multiple Turn Cycle ========== */
+    printf("\n=== Test 13: Multiple Turn Cycle ===\n");
     printf("Running 5 turns to verify stability...\n");
 
     int start_turn = obs.turn;
@@ -657,8 +784,8 @@ int main(int argc, char **argv)
                "Completed 5 turns or game ended");
     printf("Final turn: %d, game_over: %d\n", obs.turn, obs.game_over);
 
-    /* ========== Test 11: Build Unit From City ========== */
-    printf("\n=== Test 11: Build Unit From City ===\n");
+    /* ========== Test 14: Build Unit From City ========== */
+    printf("\n=== Test 14: Build Unit From City ===\n");
     fcgym_get_observation(&obs);
     fcgym_get_valid_actions(&valid);
 

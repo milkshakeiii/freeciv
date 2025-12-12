@@ -722,9 +722,16 @@ void fcgym_get_valid_actions(FcValidActions *actions)
             }
 
             /* Check can build road/irrigation/mine */
-            if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_GEN_ROAD,
-                                     activity_default_action(ACTIVITY_GEN_ROAD))) {
-                actions->unit_actions[idx].can_build_road = true;
+            /* For roads, we need to find a target extra first */
+            {
+                struct extra_type *road_target = next_extra_for_tile(
+                    punit->tile, EC_ROAD, unit_owner(punit), punit);
+                if (road_target != NULL &&
+                    can_unit_do_activity_targeted(&(wld.map), punit, ACTIVITY_GEN_ROAD,
+                                                  activity_default_action(ACTIVITY_GEN_ROAD),
+                                                  road_target)) {
+                    actions->unit_actions[idx].can_build_road = true;
+                }
             }
             if (can_unit_do_activity(&(wld.map), punit, ACTIVITY_IRRIGATE,
                                      activity_default_action(ACTIVITY_IRRIGATE))) {
