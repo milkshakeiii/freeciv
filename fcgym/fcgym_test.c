@@ -559,6 +559,70 @@ int main(int argc, char **argv)
                "Completed 5 turns or game ended");
     printf("Final turn: %d, game_over: %d\n", obs.turn, obs.game_over);
 
+    /* ========== Test 11: Build Unit From City ========== */
+    printf("\n=== Test 11: Build Unit From City ===\n");
+    fcgym_get_observation(&obs);
+    fcgym_get_valid_actions(&valid);
+
+    if (valid.num_city_actions > 0 && valid.city_actions[0].num_buildable_units > 0) {
+        int city_id = valid.city_actions[0].city_id;
+        FcCityObs *city = get_city_by_id(&obs, city_id);
+
+        /* Find the cheapest unit to build (usually Warriors) */
+        int unit_to_build = valid.city_actions[0].buildable_units[0];
+        const char *unit_name = fcgym_unit_type_name(unit_to_build);
+        printf("City %d will build %s (type %d)\n", city_id, unit_name ? unit_name : "?", unit_to_build);
+
+        /* Set production */
+        FcAction set_prod = {
+            .type = FCGYM_ACTION_CITY_BUILD,
+            .actor_id = city_id,
+            .target_id = unit_to_build,
+            .sub_target = 0,  /* 0 = unit */
+        };
+        fcgym_step(&set_prod);
+
+        /* Record units before */
+        fcgym_get_observation(&obs);
+        int units_before = count_player_units(&obs, obs.controlled_player);
+        city = get_city_by_id(&obs, city_id);
+        printf("Before: %d units, city shield_stock=%d, turns_to_complete=%d\n",
+               units_before, city->shield_stock, city->turns_to_complete);
+
+        /* Advance turns until unit is built (max 20 turns to avoid infinite loop) */
+        bool unit_built = false;
+        int max_turns = 20;
+        for (int t = 0; t < max_turns && !unit_built && !obs.game_over; t++) {
+            FcAction et = { .type = FCGYM_ACTION_END_TURN };
+            fcgym_step(&et);
+            fcgym_get_observation(&obs);
+
+            int units_now = count_player_units(&obs, obs.controlled_player);
+            city = get_city_by_id(&obs, city_id);
+
+            if (units_now > units_before) {
+                printf("Turn %d: Unit built! Units: %d -> %d\n", obs.turn, units_before, units_now);
+                unit_built = true;
+            } else if (city) {
+                printf("  Turn %d: shield_stock=%d, turns_to_complete=%d\n",
+                       obs.turn, city->shield_stock, city->turns_to_complete);
+            }
+        }
+
+        TEST_ASSERT(unit_built, "Unit was built from city production");
+
+        /* Verify city is still producing (auto-queued same unit or something else) */
+        fcgym_get_observation(&obs);
+        city = get_city_by_id(&obs, city_id);
+        if (city) {
+            printf("After build: city producing type %d, is_unit=%d\n",
+                   city->producing_type, city->producing_is_unit);
+        }
+    } else {
+        printf("SKIP: No city available to build units\n");
+    }
+    fcgym_free_valid_actions(&valid);
+
     /* ========== Summary ========== */
     printf("\n=== Test Summary ===\n");
     printf("Passed: %d\n", tests_passed);
