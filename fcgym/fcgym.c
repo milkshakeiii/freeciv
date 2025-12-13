@@ -454,6 +454,7 @@ int fcgym_new_game(const FcGameConfig *config)
         server_game_free();
         fc_rand_uninit();
         server_game_init(FALSE);
+        init_game_seed();  /* Reinitialize RNG before any code that uses random */
         fcgym_game_running = false;
     }
 
