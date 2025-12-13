@@ -2,7 +2,7 @@
 Demo: Freeciv Gymnasium environment backed by fcgym.
 
 Usage (from repo root):
-  python freeciv/fcgym/demo_freeciv_gym_env.py --steps 50 --seed 123
+  python3 freeciv/fcgym/demo_freeciv_gym_env.py --steps 50 --seed 123
 
 What it shows:
 - `env.reset()` returns (obs, info) where obs is a Dict of fixed-shape arrays.

@@ -30,6 +30,19 @@ make BUILD_DIR=../build
 make test
 ```
 
+## Python Gymnasium Env
+
+`freeciv_gym_env.py` exposes a Gymnasium `Env` (`FreecivGymEnv`) backed by `libfcgym.so`.
+
+Demo:
+
+```bash
+python3 freeciv/fcgym/demo_freeciv_gym_env.py --steps 50 --seed 123
+```
+
+Notes:
+- `fcgym` uses global Freeciv state: run at most 1 env instance per process (use subprocess/Ray for parallelism).
+
 ## API
 
 ```c
