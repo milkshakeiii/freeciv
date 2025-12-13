@@ -315,6 +315,10 @@ class FreecivGymEnv(gym.Env):
         self._action_mask = np.zeros(max_legal_actions, dtype=np.float32)
         self._num_legal_actions = 0
 
+        # Turn-based reward tracking
+        self._current_turn = 0
+        self._score_at_turn_start = 0
+
         # Define spaces
         self._define_spaces()
 
@@ -775,11 +779,23 @@ class FreecivGymEnv(gym.Env):
             "num_legal_actions": self._num_legal_actions,
         }
 
+        # Initialize turn-based reward tracking
+        self._current_turn = obs.turn
+        self._score_at_turn_start = self._get_our_score(obs)
+
         # Free C memory
         self._lib.fcgym_free_observation(obs)
         self._lib.fcgym_free_valid_actions(valid)
 
         return observation, info
+
+    def _get_our_score(self, obs) -> int:
+        """Get controlled player's current score."""
+        controlled = obs.controlled_player
+        for i in range(obs.num_players):
+            if obs.players[i].index == controlled:
+                return obs.players[i].score
+        return 0
 
     def step(self, action: int) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """Execute one step in the environment."""
@@ -811,11 +827,20 @@ class FreecivGymEnv(gym.Env):
         # Build observation dict
         observation = self._build_observation(obs)
 
-        # Use reward from step result, or calculate our own
-        reward = result.reward if result.reward != 0.0 else self._calculate_reward(obs)
-
         terminated = result.done or obs.game_over
         truncated = result.truncated
+
+        # Turn-based rewards: only give reward when turn ends
+        turn_ended = (action_type == FcActionType.END_TURN) or (obs.turn != self._current_turn)
+
+        if turn_ended or terminated:
+            # Reward = score change since turn start
+            current_score = self._get_our_score(obs)
+            reward = (current_score - self._score_at_turn_start) * 0.01  # Scale factor
+            self._score_at_turn_start = current_score
+            self._current_turn = obs.turn
+        else:
+            reward = 0.0  # No reward until turn ends
 
         info = {
             "turn": obs.turn,
@@ -831,42 +856,6 @@ class FreecivGymEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    def _calculate_reward(self, obs) -> float:
-        """Calculate reward from observation."""
-        # Simple reward based on game state
-        controlled = obs.controlled_player
-
-        # Find our player
-        our_player = None
-        for i in range(obs.num_players):
-            if obs.players[i].index == controlled:
-                our_player = obs.players[i]
-                break
-
-        if our_player is None or not our_player.is_alive:
-            return -1.0  # We lost
-
-        # Positive reward for staying alive, units, cities
-        reward = 0.001  # Survival reward
-        reward += 0.001 * our_player.num_units
-        reward += 0.01 * our_player.num_cities
-        reward += 0.0001 * our_player.score
-
-        if obs.game_over:
-            # Check if we won
-            # Simple heuristic: highest score
-            max_score = our_player.score
-            for i in range(obs.num_players):
-                p = obs.players[i]
-                if p.is_alive and p.index != controlled and p.score > max_score:
-                    max_score = p.score
-
-            if our_player.score >= max_score:
-                reward += 1.0  # Win bonus
-            else:
-                reward -= 0.5  # Loss penalty
-
-        return reward
 
     def render(self) -> Optional[str]:
         """Render the current game state."""
