@@ -68,14 +68,31 @@ TEST_SRCS = fcgym_test.c
 
 # Targets
 LIB = libfcgym.a
+SHARED_LIB = libfcgym.so
 TEST = fcgym_test
 
-.PHONY: all clean test
+.PHONY: all clean test shared
 
 all: $(LIB) $(TEST)
 
+shared: $(SHARED_LIB)
+
 $(LIB): $(OBJS)
 	ar rcs $@ $^
+
+# Build shared library with all freeciv dependencies bundled
+# Thin archives use relative paths, so we need to run from the build dir
+ABS_BUILD_DIR := $(realpath $(BUILD_DIR))
+$(SHARED_LIB): $(OBJS)
+	cd $(ABS_BUILD_DIR) && $(CC) -shared -o $(CURDIR)/$@ $(CURDIR)/$(OBJS) \
+		-Wl,--whole-archive \
+		libfc_server.a \
+		libfc_ai.a \
+		libfc_dependencies.a \
+		-Wl,--no-whole-archive \
+		libfreeciv.so \
+		-Wl,-rpath,$(ABS_BUILD_DIR) \
+		-lm -lpthread -lz -licuuc -ldl
 
 $(TEST): $(TEST_SRCS) $(LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(TEST_SRCS) -L. -lfcgym $(LIBS)
@@ -84,7 +101,7 @@ $(TEST): $(TEST_SRCS) $(LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(LIB) $(TEST)
+	rm -f $(OBJS) $(LIB) $(SHARED_LIB) $(TEST)
 
 # Run the test
 test: $(TEST)
