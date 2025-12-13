@@ -434,8 +434,8 @@ void fcgym_shutdown(void)
     }
 
     if (fcgym_game_running) {
-        /* Clean up game state */
-        game_free();
+        /* Clean up game state - use server_game_free for full cleanup */
+        server_game_free();
         fcgym_game_running = false;
     }
 
@@ -449,10 +449,11 @@ int fcgym_new_game(const FcGameConfig *config)
         return -1;
     }
 
-    /* Reset if a game is already running */
+    /* Reset if a game is already running - use full server cleanup */
     if (fcgym_game_running) {
-        game_free();
-        game_init(FALSE);
+        server_game_free();
+        fc_rand_uninit();
+        server_game_init(FALSE);
         fcgym_game_running = false;
     }
 
