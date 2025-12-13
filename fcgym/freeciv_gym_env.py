@@ -147,7 +147,8 @@ ffi.cdef("""
     typedef struct {
         int unit_id;
         bool can_move[8];
-        bool can_attack;
+        int attackable_tiles[8];
+        int num_attackable_tiles;
         bool can_fortify;
         bool can_build_city;
         bool can_build_road;
@@ -404,17 +405,20 @@ class FreecivGymEnv(gym.Env):
                 continue
             slot = self._unit_id_to_slot[unit_id]
 
-            # Movement in 8 directions
+            # Movement in 8 directions (non-combat moves only)
             for d in range(8):
                 if ua.can_move[d] and idx < self.max_legal_actions:
                     self._legal_actions[idx] = [FcActionType.UNIT_MOVE, slot, 0, d]
                     self._action_mask[idx] = 1.0
                     idx += 1
 
-            # NOTE: UNIT_ATTACK is not included because fcgym_get_valid_actions
-            # only provides can_attack=true without specifying valid target tiles.
-            # fcgym_step expects target_id to be a tile index, so we can't generate
-            # valid attack actions without C-side support for enumerating targets.
+            # Attack actions - enumerate from attackable_tiles array
+            for a in range(ua.num_attackable_tiles):
+                if idx < self.max_legal_actions:
+                    target_tile = ua.attackable_tiles[a]
+                    self._legal_actions[idx] = [FcActionType.UNIT_ATTACK, slot, target_tile, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
             # Fortify
             if ua.can_fortify and idx < self.max_legal_actions:

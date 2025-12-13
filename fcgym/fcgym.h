@@ -170,8 +170,9 @@ typedef struct {
     /* For each unit owned by controlled player */
     struct {
         int unit_id;
-        bool can_move[8];       /* 8 directions */
-        bool can_attack;
+        bool can_move[8];       /* 8 directions (non-combat moves only) */
+        int attackable_tiles[8]; /* Tile indices of valid attack targets */
+        int num_attackable_tiles; /* Number of valid attack targets (0-8) */
         bool can_fortify;
         bool can_build_city;
         bool can_build_road;

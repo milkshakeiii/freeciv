@@ -736,21 +736,35 @@ void fcgym_get_valid_actions(FcValidActions *actions)
         unit_list_iterate(pplayer->units, punit) {
             actions->unit_actions[idx].unit_id = punit->id;
 
-            /* Check movement in each valid direction */
+            /* Initialize attack targets */
+            actions->unit_actions[idx].num_attackable_tiles = 0;
+
+            /* Check movement and attack in each valid direction */
             for (int d = 0; d < wld.map.num_valid_dirs; d++) {
                 enum direction8 dir = wld.map.valid_dirs[d];
                 struct tile *dst_tile = mapstep(&(wld.map), punit->tile, dir);
 
                 if (dst_tile != NULL && punit->moves_left > 0) {
-                    /* Check if can move to tile (simplified - just check basic movement) */
-                    if (unit_can_move_to_tile(&(wld.map), punit, dst_tile, FALSE, FALSE, FALSE)) {
-                        actions->unit_actions[idx].can_move[dir] = true;
-                    }
-                    /* Also allow if there's an enemy to attack */
-                    if (is_enemy_unit_tile(dst_tile, pplayer) ||
-                        is_enemy_city_tile(dst_tile, pplayer)) {
-                        actions->unit_actions[idx].can_attack = true;
-                        actions->unit_actions[idx].can_move[dir] = true;
+                    bool has_enemy = is_enemy_unit_tile(dst_tile, pplayer) ||
+                                     is_enemy_city_tile(dst_tile, pplayer);
+
+                    if (has_enemy) {
+                        /* Check if attack is actually valid using engine check */
+                        if (is_action_enabled_unit_on_stack(&(wld.map), ACTION_ATTACK,
+                                                            punit, dst_tile)) {
+                            /* Add to attackable tiles array */
+                            int aidx = actions->unit_actions[idx].num_attackable_tiles;
+                            if (aidx < 8) {
+                                actions->unit_actions[idx].attackable_tiles[aidx] = tile_index(dst_tile);
+                                actions->unit_actions[idx].num_attackable_tiles++;
+                            }
+                        }
+                        /* Don't set can_move for tiles with enemies - attack is separate */
+                    } else {
+                        /* Non-combat move - check if can move to empty/friendly tile */
+                        if (unit_can_move_to_tile(&(wld.map), punit, dst_tile, FALSE, FALSE, FALSE)) {
+                            actions->unit_actions[idx].can_move[dir] = true;
+                        }
                     }
                 }
             }

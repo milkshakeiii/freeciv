@@ -928,22 +928,16 @@ int main(int argc, char **argv)
                         if (enemy != NULL) {
                             printf("Created enemy Warriors at adjacent tile\n");
 
-                            /* Get valid actions - should now have can_attack */
+                            /* Get valid actions - should now have attackable_tiles */
                             fcgym_get_valid_actions(&valid);
                             bool can_attack_now = false;
-                            int attack_dir = -1;
+                            int attack_target_tile = -1;
                             for (int i = 0; i < valid.num_unit_actions; i++) {
                                 if (valid.unit_actions[i].unit_id == attacker_id &&
-                                    valid.unit_actions[i].can_attack) {
+                                    valid.unit_actions[i].num_attackable_tiles > 0) {
                                     can_attack_now = true;
-                                    /* Find the direction to the enemy */
-                                    for (int d = 0; d < 8; d++) {
-                                        struct tile *adj = mapstep(&(wld.map), attacker_tile, d);
-                                        if (adj == enemy_tile) {
-                                            attack_dir = d;
-                                            break;
-                                        }
-                                    }
+                                    /* Use the first attackable tile */
+                                    attack_target_tile = valid.unit_actions[i].attackable_tiles[0];
                                     break;
                                 }
                             }
@@ -951,7 +945,7 @@ int main(int argc, char **argv)
 
                             TEST_ASSERT(can_attack_now, "can_attack is true with adjacent enemy");
 
-                            if (can_attack_now && attack_dir >= 0) {
+                            if (can_attack_now && attack_target_tile >= 0) {
                                 int enemy_id = enemy->id;
                                 int enemy_tile_index = tile_index(enemy_tile);
 
