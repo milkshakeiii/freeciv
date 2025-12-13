@@ -31,7 +31,7 @@ MAX_LEGAL_ACTIONS = 1024  # Configurable cap on legal actions per step
 MAX_UNITS = 256
 MAX_CITIES = 64
 MAX_PLAYERS = 8
-MAP_CHANNELS = 8  # visibility, terrain, road, irrigation, mine, ownership_self, ownership_enemy, city
+MAP_CHANNELS = 9  # visibility, terrain, road, irrigation, mine, ownership_self, ownership_enemy, city, unit_visible
 
 
 class FcActionType(IntEnum):
@@ -512,7 +512,9 @@ class FreecivGymEnv(gym.Env):
         global_obs[9] = obs.winner if obs.game_over else -1
 
         # Map observation from tiles
-        # Channels: 0=visibility, 1=terrain, 2=road, 3=irrigation, 4=mine, 5=ownership_self, 6=ownership_enemy, 7=city
+        # Channels:
+        #   0=visibility, 1=terrain, 2=road, 3=irrigation, 4=mine,
+        #   5=ownership_self, 6=ownership_enemy, 7=city, 8=unit_visible
         map_obs = np.zeros((MAP_CHANNELS, self.map_height, self.map_width), dtype=np.uint8)
         controlled = obs.controlled_player
 
@@ -556,6 +558,10 @@ class FreecivGymEnv(gym.Env):
                 # Channel 7: city presence
                 if tile.has_city:
                     map_obs[7, y, x] = 255
+
+                # Channel 8: unit presence (only set when currently visible)
+                if tile.has_unit:
+                    map_obs[8, y, x] = 255
 
         # Units
         unit_obs = np.zeros((MAX_UNITS, 10), dtype=np.float32)
