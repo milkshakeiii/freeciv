@@ -4,13 +4,17 @@ Freeciv Gymnasium Environment using fcgym C library.
 This uses CFFI to bind to the fcgym library which provides direct access
 to the Freeciv game engine without network protocols.
 
+IMPORTANT: fcgym uses global Freeciv state - only one env instance per process.
+
 Action Space:
 - Discrete(MAX_LEGAL) with state-dependent legal action masking
-- Each step returns action_mask and legal_actions in info
+- Each step returns action_mask (fixed size) and legal_actions (fixed size, padded) in info
+- legal_actions[i] = [action_type, actor_slot, target, sub_target]
 
 Observation Space:
 - Dict with: global, map, units, cities, players arrays
-- Stable slotting by engine ID for consistent actor_slot mapping
+- units/cities only include OUR controllable entities (stable slots)
+- Enemy visibility via map channels (ownership_enemy, has_unit on tiles)
 """
 
 import os
@@ -347,21 +351,33 @@ class FreecivGymEnv(gym.Env):
     def _update_slot_mappings(self, obs):
         """Update stable slot mappings from observation.
 
-        Slots are assigned by sorting engine IDs to ensure consistency.
+        Only our own controllable units/cities are slotted to ensure stability.
+        Enemy units appearing/disappearing won't shift our slots.
+        Slots are assigned by sorting engine IDs for consistency.
         """
-        # Get all unit IDs and sort them
-        unit_ids = sorted([obs.units[i].id for i in range(obs.num_units)])
+        controlled = obs.controlled_player
+
+        # Get only OUR unit IDs and sort them
+        our_unit_ids = sorted([
+            obs.units[i].id
+            for i in range(obs.num_units)
+            if obs.units[i].owner == controlled
+        ])
         self._unit_id_to_slot.clear()
         self._slot_to_unit_id.clear()
-        for slot, uid in enumerate(unit_ids):
+        for slot, uid in enumerate(our_unit_ids):
             self._unit_id_to_slot[uid] = slot
             self._slot_to_unit_id[slot] = uid
 
-        # Get all city IDs and sort them
-        city_ids = sorted([obs.cities[i].id for i in range(obs.num_cities)])
+        # Get only OUR city IDs and sort them
+        our_city_ids = sorted([
+            obs.cities[i].id
+            for i in range(obs.num_cities)
+            if obs.cities[i].owner == controlled
+        ])
         self._city_id_to_slot.clear()
         self._slot_to_city_id.clear()
-        for slot, cid in enumerate(city_ids):
+        for slot, cid in enumerate(our_city_ids):
             self._city_id_to_slot[cid] = slot
             self._slot_to_city_id[slot] = cid
 
@@ -395,15 +411,10 @@ class FreecivGymEnv(gym.Env):
                     self._action_mask[idx] = 1.0
                     idx += 1
 
-            # Attack (uses target_id for tile index, encoded as direction for now)
-            if ua.can_attack and idx < self.max_legal_actions:
-                # For attack, we'd need to enumerate valid attack targets
-                # For now, we'll encode similar to move with sub_target as direction
-                for d in range(8):
-                    if ua.can_move[d] and idx < self.max_legal_actions:
-                        self._legal_actions[idx] = [FcActionType.UNIT_ATTACK, slot, 0, d]
-                        self._action_mask[idx] = 1.0
-                        idx += 1
+            # NOTE: UNIT_ATTACK is not included because fcgym_get_valid_actions
+            # only provides can_attack=true without specifying valid target tiles.
+            # fcgym_step expects target_id to be a tile index, so we can't generate
+            # valid attack actions without C-side support for enumerating targets.
 
             # Fortify
             if ua.can_fortify and idx < self.max_legal_actions:
@@ -496,14 +507,56 @@ class FreecivGymEnv(gym.Env):
         global_obs[8] = obs.current_player
         global_obs[9] = obs.winner if obs.game_over else -1
 
-        # Map (placeholder - would need to query tile data)
+        # Map observation from tiles
+        # Channels: 0=visibility, 1=terrain, 2=road, 3=irrigation, 4=mine, 5=ownership_self, 6=ownership_enemy, 7=city
         map_obs = np.zeros((MAP_CHANNELS, self.map_height, self.map_width), dtype=np.uint8)
+        controlled = obs.controlled_player
+
+        for i in range(obs.num_tiles):
+            tile = obs.tiles[i]
+            x = i % obs.map_xsize
+            y = i // obs.map_xsize
+
+            # Skip if out of our observation bounds
+            if x >= self.map_width or y >= self.map_height:
+                continue
+
+            # Channel 0: visibility (255=visible, 128=explored, 0=unknown)
+            if tile.visible:
+                map_obs[0, y, x] = 255
+            elif tile.explored:
+                map_obs[0, y, x] = 128
+            # else: stays 0 (unknown)
+
+            # Only fill other channels if tile has been explored
+            # (C side sets terrain=-1 for unexplored, which becomes 255 as uint8)
+            if tile.explored:
+                # Channel 1: terrain type (only if explored)
+                map_obs[1, y, x] = tile.terrain if tile.terrain >= 0 else 0
+
+                # Channel 2-4: extras (road, irrigation, mine from extras bitfield)
+                if tile.extras & 0x01:
+                    map_obs[2, y, x] = 255  # road
+                if tile.extras & 0x02:
+                    map_obs[3, y, x] = 255  # irrigation
+                if tile.extras & 0x04:
+                    map_obs[4, y, x] = 255  # mine
+
+                # Channel 5-6: ownership
+                if tile.owner >= 0:
+                    if tile.owner == controlled:
+                        map_obs[5, y, x] = 255  # ownership_self
+                    else:
+                        map_obs[6, y, x] = 255  # ownership_enemy
+
+                # Channel 7: city presence
+                if tile.has_city:
+                    map_obs[7, y, x] = 255
 
         # Units
         unit_obs = np.zeros((MAX_UNITS, 10), dtype=np.float32)
         unit_mask = np.zeros(MAX_UNITS, dtype=np.float32)
 
-        controlled = obs.controlled_player
         for i in range(min(obs.num_units, MAX_UNITS)):
             u = obs.units[i]
             if u.id in self._unit_id_to_slot:
@@ -666,7 +719,7 @@ class FreecivGymEnv(gym.Env):
         info = {
             "turn": obs.turn,
             "action_mask": self._action_mask.copy(),
-            "legal_actions": self._legal_actions[:self._num_legal_actions].copy(),
+            "legal_actions": self._legal_actions.copy(),  # Full fixed-size array
             "num_legal_actions": self._num_legal_actions,
         }
 
@@ -715,7 +768,7 @@ class FreecivGymEnv(gym.Env):
         info = {
             "turn": obs.turn,
             "action_mask": self._action_mask.copy(),
-            "legal_actions": self._legal_actions[:self._num_legal_actions].copy(),
+            "legal_actions": self._legal_actions.copy(),  # Full fixed-size array
             "num_legal_actions": self._num_legal_actions,
             "step_info": ffi.string(result.info).decode('utf-8') if result.info != ffi.NULL else "",
         }

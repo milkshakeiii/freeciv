@@ -532,18 +532,46 @@ void fcgym_get_observation(FcObservation *obs)
         obs->tiles = fc_calloc(obs->num_tiles, sizeof(FcTileObs));
     }
 
-    /* Fill tile data */
+    /* Fill tile data with proper fog-of-war handling */
     whole_map_iterate(&(wld.map), ptile) {
         int idx = tile_index(ptile);
         FcTileObs *tobs = &obs->tiles[idx];
 
-        tobs->terrain = terrain_number(tile_terrain(ptile));
-        tobs->owner = tile_owner(ptile) ? player_number(tile_owner(ptile)) : -1;
-        tobs->has_city = tile_city(ptile) != NULL;
-        tobs->has_unit = unit_list_size(ptile->units) > 0;
-        tobs->visible = map_is_known(ptile, pplayer);
-        tobs->explored = map_is_known(ptile, pplayer);
-        tobs->extras = 0;  /* TODO: Fill in extras bitmask */
+        /* Check visibility status */
+        bool is_explored = map_is_known(ptile, pplayer);
+        bool is_visible = map_is_known_and_seen(ptile, pplayer, V_MAIN);
+
+        tobs->explored = is_explored;
+        tobs->visible = is_visible;
+
+        if (!is_explored) {
+            /* Tile never seen - zero out everything */
+            tobs->terrain = -1;
+            tobs->owner = -1;
+            tobs->has_city = false;
+            tobs->has_unit = false;
+            tobs->extras = 0;
+        } else {
+            /* Tile has been explored - reveal static info */
+            tobs->terrain = terrain_number(tile_terrain(ptile));
+            tobs->owner = tile_owner(ptile) ? player_number(tile_owner(ptile)) : -1;
+            tobs->has_city = tile_city(ptile) != NULL;
+
+            /* Units only visible if tile is currently visible (they move!) */
+            tobs->has_unit = is_visible && (unit_list_size(ptile->units) > 0);
+
+            /* Fill extras bitmask: bit 0=road, bit 1=irrigation, bit 2=mine */
+            tobs->extras = 0;
+            if (tile_has_cause_extra(ptile, EC_ROAD)) {
+                tobs->extras |= 0x01;
+            }
+            if (tile_has_cause_extra(ptile, EC_IRRIGATION)) {
+                tobs->extras |= 0x02;
+            }
+            if (tile_has_cause_extra(ptile, EC_MINE)) {
+                tobs->extras |= 0x04;
+            }
+        }
     } whole_map_iterate_end;
 
     /* Count units and cities for allocation */
@@ -561,12 +589,15 @@ void fcgym_get_observation(FcObservation *obs)
         obs->max_units = total_units;
     }
 
-    /* Fill unit data (only visible units) */
+    /* Fill unit data (own units always visible, enemy units only if tile visible) */
     obs->num_units = 0;
     players_iterate(p) {
         unit_list_iterate(p->units, punit) {
-            /* Only include if visible to our player */
-            if (map_is_known(punit->tile, pplayer)) {
+            /* Own units always visible; enemy units only if tile is currently visible */
+            bool is_own = (unit_owner(punit) == pplayer);
+            bool tile_visible = map_is_known_and_seen(punit->tile, pplayer, V_MAIN);
+
+            if (is_own || tile_visible) {
                 FcUnitObs *uobs = &obs->units[obs->num_units++];
                 uobs->id = punit->id;
                 uobs->type = utype_number(unit_type_get(punit));
@@ -588,30 +619,44 @@ void fcgym_get_observation(FcObservation *obs)
         obs->max_cities = total_cities;
     }
 
-    /* Fill city data (only visible cities) */
+    /* Fill city data (own cities always, enemy cities only if explored) */
     obs->num_cities = 0;
     players_iterate(p) {
         city_list_iterate(p->cities, pcity) {
-            if (map_is_known(city_tile(pcity), pplayer)) {
+            bool is_own = (city_owner(pcity) == pplayer);
+            bool tile_explored = map_is_known(city_tile(pcity), pplayer);
+
+            if (is_own || tile_explored) {
                 FcCityObs *cobs = &obs->cities[obs->num_cities++];
                 cobs->id = pcity->id;
                 cobs->owner = player_number(city_owner(pcity));
                 cobs->tile_index = tile_index(city_tile(pcity));
                 cobs->size = city_size_get(pcity);
-                cobs->food_stock = pcity->food_stock;
-                cobs->shield_stock = pcity->shield_stock;
-                /* Production info */
-                if (pcity->production.kind == VUT_UTYPE) {
-                    cobs->producing_is_unit = true;
-                    cobs->producing_type = utype_index(pcity->production.value.utype);
-                } else if (pcity->production.kind == VUT_IMPROVEMENT) {
-                    cobs->producing_is_unit = false;
-                    cobs->producing_type = improvement_index(pcity->production.value.building);
+
+                /* Internal city stats hidden for enemy cities */
+                if (is_own) {
+                    cobs->food_stock = pcity->food_stock;
+                    cobs->shield_stock = pcity->shield_stock;
+                    /* Production info */
+                    if (pcity->production.kind == VUT_UTYPE) {
+                        cobs->producing_is_unit = true;
+                        cobs->producing_type = utype_index(pcity->production.value.utype);
+                    } else if (pcity->production.kind == VUT_IMPROVEMENT) {
+                        cobs->producing_is_unit = false;
+                        cobs->producing_type = improvement_index(pcity->production.value.building);
+                    } else {
+                        cobs->producing_type = -1;
+                        cobs->producing_is_unit = false;
+                    }
+                    cobs->turns_to_complete = city_production_turns_to_build(pcity, TRUE);
                 } else {
+                    /* Enemy city - hide internal info */
+                    cobs->food_stock = -1;
+                    cobs->shield_stock = -1;
                     cobs->producing_type = -1;
                     cobs->producing_is_unit = false;
+                    cobs->turns_to_complete = -1;
                 }
-                cobs->turns_to_complete = city_production_turns_to_build(pcity, TRUE);
             }
         } city_list_iterate_end;
     } players_iterate_end;
