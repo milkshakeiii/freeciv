@@ -4,7 +4,9 @@ Freeciv Gymnasium Environment using fcgym C library.
 This uses CFFI to bind to the fcgym library which provides direct access
 to the Freeciv game engine without network protocols.
 
-IMPORTANT: fcgym uses global Freeciv state - only one env instance per process.
+Note: fcgym uses global Freeciv state. Multiple env instances can be created
+sequentially (create, use, close, create new), but only one game runs at a time.
+The library is initialized once per process and cleaned up automatically on exit.
 
 Action Space:
 - Discrete(MAX_LEGAL) with state-dependent legal action masking
@@ -17,6 +19,7 @@ Observation Space:
 - Enemy visibility via map channels (ownership_enemy, has_unit on tiles)
 """
 
+import atexit
 import os
 import numpy as np
 import gymnasium as gym
@@ -32,6 +35,34 @@ MAX_UNITS = 256
 MAX_CITIES = 64
 MAX_PLAYERS = 8
 MAP_CHANNELS = 9  # visibility, terrain, road, irrigation, mine, ownership_self, ownership_enemy, city, unit_visible
+
+# Module-level library state (shared across all env instances in this process)
+_lib_handle = None
+_library_initialized = False
+
+
+def _shutdown_library():
+    """Shutdown the fcgym library. Called automatically on process exit."""
+    global _library_initialized, _lib_handle
+    if _library_initialized and _lib_handle is not None:
+        _lib_handle.fcgym_shutdown()
+        _library_initialized = False
+        _lib_handle = None
+
+
+# Register shutdown handler for clean process exit
+atexit.register(_shutdown_library)
+
+
+def shutdown_library():
+    """Explicitly shutdown the fcgym library.
+
+    Normally not needed - the library shuts down automatically on process exit.
+    Only call this if you need to free resources before the process ends.
+    After calling this, no FreecivGymEnv instances can be used until a new
+    process is started.
+    """
+    _shutdown_library()
 
 
 class FcActionType(IntEnum):
@@ -316,11 +347,16 @@ class FreecivGymEnv(gym.Env):
 
     def _load_library(self):
         """Load the fcgym library using CFFI."""
+        global _lib_handle
+
+        # Use module-level handle if already loaded
+        if _lib_handle is not None:
+            self._lib = _lib_handle
+            return
+
         if self._lib is not None:
             return
 
-        # For now, we need to use the test executable approach or build a shared library
-        # This is a placeholder - in practice we'd need to build libfcgym.so
         lib_path = _find_library()
         if lib_path is None:
             raise RuntimeError(
@@ -329,7 +365,6 @@ class FreecivGymEnv(gym.Env):
 
         # Note: CFFI with static libraries requires linking at build time
         # For dynamic loading, we need a shared library (.so)
-        # For now, we'll raise an informative error
         if lib_path.endswith('.a'):
             raise RuntimeError(
                 f"Found static library {lib_path}, but CFFI needs a shared library (.so). "
@@ -337,16 +372,23 @@ class FreecivGymEnv(gym.Env):
             )
 
         self._lib = ffi.dlopen(lib_path)
+        _lib_handle = self._lib
 
     def _init_fcgym(self):
         """Initialize fcgym library."""
-        if self._initialized:
+        global _library_initialized
+
+        # Library already initialized in this process - just update instance state
+        if _library_initialized:
+            self._load_library()  # Ensure self._lib is set
+            self._initialized = True
             return
 
         self._load_library()
         result = self._lib.fcgym_init()
         if result != 0:
             raise RuntimeError("Failed to initialize fcgym")
+        _library_initialized = True
         self._initialized = True
 
     def _update_slot_mappings(self, obs):
@@ -836,10 +878,19 @@ class FreecivGymEnv(gym.Env):
         return None
 
     def close(self):
-        """Clean up resources."""
-        if self._initialized and self._lib is not None:
-            self._lib.fcgym_shutdown()
-            self._initialized = False
+        """Clean up instance resources.
+
+        Note: This does NOT shutdown the fcgym library. The library remains
+        initialized for other env instances and is automatically shutdown
+        on process exit via atexit. To explicitly shutdown, use shutdown_library().
+        """
+        # Clear instance state but don't touch the shared library
+        self._initialized = False
+        self._lib = None
+        self._unit_id_to_slot.clear()
+        self._city_id_to_slot.clear()
+        self._slot_to_unit_id.clear()
+        self._slot_to_city_id.clear()
 
 
 def make_freeciv_gym_env(**kwargs) -> FreecivGymEnv:
