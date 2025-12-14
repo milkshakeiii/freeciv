@@ -319,6 +319,21 @@ class FreecivGymEnv(gym.Env):
         self._current_turn = 0
         self._score_at_turn_start = 0
 
+        # Per-turn action limiting: track (action_type, actor_id) taken this turn
+        # Decision actions can only be done once per actor per turn
+        self._actions_taken_this_turn: set = set()
+        self._decision_actions = {
+            FcActionType.UNIT_FORTIFY,
+            FcActionType.UNIT_BUILD_CITY,
+            FcActionType.UNIT_BUILD_ROAD,
+            FcActionType.UNIT_BUILD_IRRIGATION,
+            FcActionType.UNIT_BUILD_MINE,
+            FcActionType.UNIT_DISBAND,
+            FcActionType.CITY_BUILD,
+            FcActionType.CITY_BUY,
+            FcActionType.RESEARCH_SET,  # actor_id=0 for global actions
+        }
+
         # Define spaces
         self._define_spaces()
 
@@ -466,41 +481,47 @@ class FreecivGymEnv(gym.Env):
                     self._action_mask[idx] = 1.0
                     idx += 1
 
-            # Fortify
+            # Fortify (once per unit per turn)
             if ua.can_fortify and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_FORTIFY, slot, 0, 0]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_FORTIFY, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_FORTIFY, slot, 0, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-            # Build city
+            # Build city (once per unit per turn)
             if ua.can_build_city and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_BUILD_CITY, slot, 0, 0]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_BUILD_CITY, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_BUILD_CITY, slot, 0, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-            # Build road
+            # Build road (once per unit per turn)
             if ua.can_build_road and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_BUILD_ROAD, slot, 0, -1]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_BUILD_ROAD, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_BUILD_ROAD, slot, 0, -1]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-            # Build irrigation
+            # Build irrigation (once per unit per turn)
             if ua.can_build_irrigation and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_BUILD_IRRIGATION, slot, 0, -1]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_BUILD_IRRIGATION, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_BUILD_IRRIGATION, slot, 0, -1]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-            # Build mine
+            # Build mine (once per unit per turn)
             if ua.can_build_mine and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_BUILD_MINE, slot, 0, -1]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_BUILD_MINE, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_BUILD_MINE, slot, 0, -1]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-            # Disband
+            # Disband (once per unit per turn)
             if ua.can_disband and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.UNIT_DISBAND, slot, 0, 0]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.UNIT_DISBAND, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.UNIT_DISBAND, slot, 0, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
         # City actions
         for i in range(valid_actions.num_city_actions):
@@ -510,35 +531,37 @@ class FreecivGymEnv(gym.Env):
                 continue
             slot = self._city_id_to_slot[city_id]
 
-            # Set production (units)
-            for j in range(ca.num_buildable_units):
-                if idx < self.max_legal_actions:
-                    unit_type = ca.buildable_units[j]
-                    self._legal_actions[idx] = [FcActionType.CITY_BUILD, slot, unit_type, 0]
-                    self._action_mask[idx] = 1.0
-                    idx += 1
+            # Set production (once per city per turn - any production change counts)
+            if (FcActionType.CITY_BUILD, slot) not in self._actions_taken_this_turn:
+                for j in range(ca.num_buildable_units):
+                    if idx < self.max_legal_actions:
+                        unit_type = ca.buildable_units[j]
+                        self._legal_actions[idx] = [FcActionType.CITY_BUILD, slot, unit_type, 0]
+                        self._action_mask[idx] = 1.0
+                        idx += 1
 
-            # Set production (buildings)
-            for j in range(ca.num_buildable_buildings):
-                if idx < self.max_legal_actions:
-                    bldg_type = ca.buildable_buildings[j]
-                    self._legal_actions[idx] = [FcActionType.CITY_BUILD, slot, bldg_type, 1]
-                    self._action_mask[idx] = 1.0
-                    idx += 1
+                for j in range(ca.num_buildable_buildings):
+                    if idx < self.max_legal_actions:
+                        bldg_type = ca.buildable_buildings[j]
+                        self._legal_actions[idx] = [FcActionType.CITY_BUILD, slot, bldg_type, 1]
+                        self._action_mask[idx] = 1.0
+                        idx += 1
 
-            # Buy
+            # Buy (once per city per turn)
             if ca.can_buy and idx < self.max_legal_actions:
-                self._legal_actions[idx] = [FcActionType.CITY_BUY, slot, 0, 0]
-                self._action_mask[idx] = 1.0
-                idx += 1
+                if (FcActionType.CITY_BUY, slot) not in self._actions_taken_this_turn:
+                    self._legal_actions[idx] = [FcActionType.CITY_BUY, slot, 0, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
-        # Research
-        for i in range(valid_actions.num_researchable_techs):
-            if idx < self.max_legal_actions:
-                tech_id = valid_actions.researchable_techs[i]
-                self._legal_actions[idx] = [FcActionType.RESEARCH_SET, 0, tech_id, 0]
-                self._action_mask[idx] = 1.0
-                idx += 1
+        # Research (once per turn - actor_id=0 for global actions)
+        if (FcActionType.RESEARCH_SET, 0) not in self._actions_taken_this_turn:
+            for i in range(valid_actions.num_researchable_techs):
+                if idx < self.max_legal_actions:
+                    tech_id = valid_actions.researchable_techs[i]
+                    self._legal_actions[idx] = [FcActionType.RESEARCH_SET, 0, tech_id, 0]
+                    self._action_mask[idx] = 1.0
+                    idx += 1
 
         self._num_legal_actions = idx
 
@@ -782,6 +805,7 @@ class FreecivGymEnv(gym.Env):
         # Initialize turn-based reward tracking
         self._current_turn = obs.turn
         self._score_at_turn_start = self._get_our_score(obs)
+        self._actions_taken_this_turn.clear()
 
         # Free C memory
         self._lib.fcgym_free_observation(obs)
@@ -812,6 +836,10 @@ class FreecivGymEnv(gym.Env):
         # Execute action
         result = self._lib.fcgym_step(fc_action)
 
+        # Track decision actions for per-turn limiting
+        if action_type in self._decision_actions:
+            self._actions_taken_this_turn.add((action_type, actor_id))
+
         # Get new observation
         obs = ffi.new("FcObservation *")
         self._lib.fcgym_get_observation(obs)
@@ -839,6 +867,8 @@ class FreecivGymEnv(gym.Env):
             reward = (current_score - self._score_at_turn_start) * 0.01  # Scale factor
             self._score_at_turn_start = current_score
             self._current_turn = obs.turn
+            # Reset per-turn action tracking for new turn
+            self._actions_taken_this_turn.clear()
         else:
             reward = 0.0  # No reward until turn ends
 

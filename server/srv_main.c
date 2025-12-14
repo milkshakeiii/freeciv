@@ -1438,7 +1438,7 @@ void begin_phase(bool is_new_phase)
   End a phase of movement. This handles all end-of-phase actions
   for one or more players.
 **************************************************************************/
-static void end_phase(void)
+void end_phase(void)
 {
   log_debug("Endphase");
 
@@ -2673,7 +2673,7 @@ void player_nation_defaults(struct player *pplayer, struct nation_type *pnation,
   For 'aifill' players, the player name/sex is then reset to that of a
   random leader for the chosen nation.
 **************************************************************************/
-static void generate_players(void)
+void generate_players(void)
 {
   int nations_to_assign = 0;
 
@@ -3202,7 +3202,7 @@ static void srv_scores(void)
   We cannot do this during ruleset loading, since some players may be
   added later than that.
 **************************************************************************/
-static void final_ruleset_adjustments(void)
+void final_ruleset_adjustments(void)
 {
   players_iterate(pplayer) {
     struct nation_type *pnation = nation_of_player(pplayer);

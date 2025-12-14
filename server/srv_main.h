@@ -132,5 +132,10 @@ void update_nations_with_startpos(void);
 /* Turn/phase management - exported for fcgym */
 void begin_turn(bool is_new_turn);
 void begin_phase(bool is_new_phase);
+void end_phase(void);
+
+/* Game setup - exported for fcgym */
+void generate_players(void);
+void final_ruleset_adjustments(void);
 
 #endif /* FC__SRV_MAIN_H */

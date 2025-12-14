@@ -65,6 +65,7 @@
 
 /* Server advisors */
 #include "advdata.h"
+#include "autoworkers.h"
 
 /* AI headers */
 #include "aitraits.h"
@@ -139,46 +140,33 @@ static int fcgym_load_ruleset(const char *ruleset)
 }
 
 /*
- * Create players for the game.
+ * Create players for the game using standard server functions.
  */
 static int fcgym_create_players(int num_ai_players, int ai_skill_level)
 {
     struct player *pplayer;
 
-    /* Create the human-controlled player */
-    pplayer = server_create_player(-1, default_ai_type_name(),
-                                   NULL, FALSE);
+    /* Set the AI skill level for aifill */
+    game.info.skill_level = ai_skill_level;
+
+    /* Create the human-controlled player first */
+    pplayer = server_create_player(-1, default_ai_type_name(), NULL, FALSE);
     if (pplayer == NULL) {
         log_error("Failed to create controlled player");
         return -1;
     }
-
     controlled_player_idx = player_number(pplayer);
     set_as_human(pplayer);
     server_player_init(pplayer, FALSE, TRUE);
 
-    /* Assign a nation to the human player */
-    player_set_nation(pplayer, pick_a_nation(NULL, FALSE, TRUE,
-                                              NOT_A_BARBARIAN));
-    ai_traits_init(pplayer);  /* Initialize traits based on nation */
+    /* Use aifill to create AI players (total = 1 human + num_ai_players) */
+    aifill(1 + num_ai_players);
 
-    /* Create AI players */
-    for (int i = 0; i < num_ai_players; i++) {
-        pplayer = server_create_player(-1, default_ai_type_name(),
-                                       NULL, FALSE);
-        if (pplayer == NULL) {
-            log_error("Failed to create AI player %d", i);
-            return -1;
-        }
-        set_as_ai(pplayer);
-        pplayer->ai_common.skill_level = ai_skill_level;
-        server_player_init(pplayer, FALSE, TRUE);
+    /* Assign nations to all players */
+    generate_players();
 
-        /* Assign a nation */
-        player_set_nation(pplayer, pick_a_nation(NULL, FALSE, TRUE,
-                                                  NOT_A_BARBARIAN));
-        ai_traits_init(pplayer);  /* Initialize traits based on nation */
-    }
+    /* Apply final ruleset adjustments (sets government, multipliers, etc.) */
+    final_ruleset_adjustments();
 
     return 0;
 }
@@ -317,47 +305,47 @@ static int fcgym_start_game(void)
     return 0;
 }
 
+
 /*
- * Run a single phase for all AI players.
- * This is what would normally happen during server_sniff_all_input().
+ * Run the main AI activities for the current phase.
+ * Call this after begin_phase() and before end_phase().
+ * end_phase() handles auto_workers, last_activities, and phase_finished.
  */
-static void fcgym_run_ai_phase(void)
+static void fcgym_run_current_ai_phase(void)
 {
-    /* Let AI players take their turns */
-    players_iterate(pplayer) {
-        if (is_ai(pplayer) && pplayer->is_alive
-            && is_player_phase(pplayer, game.info.phase)) {
-            CALL_PLR_AI_FUNC(phase_finished, pplayer, pplayer);
+    phase_players_iterate(pplayer) {
+        if (is_ai(pplayer) && pplayer->is_alive) {
+            /* Main AI activities: move units, build cities, attack, etc. */
+            CALL_PLR_AI_FUNC(first_activities, pplayer, pplayer);
+            pplayer->phase_done = TRUE;
             pplayer->ai_phase_done = TRUE;
         }
-    } players_iterate_end;
+    } phase_players_iterate_end;
 }
 
 /*
- * Process end of phase for all players.
+ * Advance through all remaining phases in the turn.
+ * In alternating turns mode, this loops through each AI player's phase.
  */
-static void fcgym_process_end_phase(void)
+static void fcgym_complete_turn(void)
 {
-    /* This is a simplified version of end_phase() from srv_main.c */
-    /* Process cities, update units, etc. */
+    /* Process remaining phases (AI players) */
+    while (game.info.phase < game.server.num_phases - 1) {
+        /* Advance to next phase */
+        game.info.phase++;
 
-    players_iterate(pplayer) {
-        if (pplayer->is_alive && is_player_phase(pplayer, game.info.phase)) {
-            /* City production and growth */
-            update_city_activities(pplayer);
-        }
-    } players_iterate_end;
-}
+        /* Start the phase for the current player */
+        begin_phase(TRUE);
 
-/*
- * Advance to the next turn.
- */
-static void fcgym_advance_turn(void)
-{
-    /* Advance turn counter */
+        /* Run AI for this phase */
+        fcgym_run_current_ai_phase();
+
+        /* Process end of phase - city updates, etc. */
+        end_phase();
+    }
+
+    /* All phases done, advance to next turn */
     game.info.turn++;
-
-    /* Use the standard freeciv turn/phase flow */
     begin_turn(TRUE);
     begin_phase(TRUE);
 }
@@ -1070,17 +1058,14 @@ FcStepResult fcgym_step(const FcAction *action)
     }
 
     case FCGYM_ACTION_END_TURN: {
-        /* Mark player as done with phase */
+        /* Mark human player as done with their phase */
         pplayer->phase_done = TRUE;
 
-        /* Run AI for their phase */
-        fcgym_run_ai_phase();
+        /* Process end of human player's phase (phase 0) */
+        end_phase();
 
-        /* Process end of phase */
-        fcgym_process_end_phase();
-
-        /* Advance turn */
-        fcgym_advance_turn();
+        /* Complete the turn: run all AI phases and advance to next turn */
+        fcgym_complete_turn();
 
         /* Check for game over */
         int winner;
